@@ -21,6 +21,10 @@ env:
   REGISTRY_DOCKERHUB: docker.io
   REGISTRY_GHCR: ghcr.io
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -78,7 +82,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ github.repository_owner }}/hhf-vpn-deployment
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/hhf-vpn-deployment
           tags: |
             # Tag with variant name for branch builds
             type=ref,event=branch,suffix=-${{ matrix.variant.tags_suffix }}
@@ -104,7 +108,7 @@ jobs:
           context: ${{ matrix.variant.context }}
           file: ${{ matrix.variant.build_dockerfile }}
           platforms: linux/amd64,linux/arm64
-          tags: hhf-vpn-deployment-build:v1.3
+          tags: openconnect-build:v1.3
           cache-from: type=gha,scope=build-${{ matrix.variant.name }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.variant.name }}
 
@@ -149,8 +153,8 @@ jobs:
       - name: Create and push latest manifest (GHCR)
         run: |
           # Point latest to the most feature-complete version (v1.3-sid)
-          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment:latest \
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment:v1.3-sid
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/hhf-vpn-deployment:latest \
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/hhf-vpn-deployment:v1.3-sid
 
   # Security scanning job
   security-scan:
@@ -164,7 +168,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'ghcr.io/${{ github.repository }}/hhf-vpn-deployment:${{ matrix.variant }}'
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/hhf-vpn-deployment:${{ matrix.variant }}'
           format: 'sarif'
           output: 'trivy-results-${{ matrix.variant }}.sarif'
 

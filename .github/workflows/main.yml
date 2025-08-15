@@ -1,0 +1,176 @@
+name: Build and Push Multi-Platform Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v1.3-sid, v1.3, v1.1)'
+        required: false
+        default: 'all'
+
+env:
+  REGISTRY_DOCKERHUB: docker.io
+  REGISTRY_GHCR: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: v1.1
+            dockerfile: src/server/v1.1/Dockerfile
+            context: src/server/v1.1
+            tags_suffix: v1.1
+          - name: v1.3
+            dockerfile: src/server/v1.3/Dockerfile
+            context: src/server/v1.3
+            tags_suffix: v1.3
+            build_dockerfile: src/server/v1.3/Dockerfile_build
+          - name: v1.3-sid
+            dockerfile: src/server/v1.3-sid/Dockerfile
+            context: src/server/v1.3-sid
+            tags_suffix: v1.3-sid
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Log in to DockerHub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_DOCKERHUB }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ github.repository_owner }}/hhf-vpn-deployment
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment
+          tags: |
+            # Tag with variant name for branch builds
+            type=ref,event=branch,suffix=-${{ matrix.variant.tags_suffix }}
+            # Tag with variant name for PR builds
+            type=ref,event=pr,suffix=-${{ matrix.variant.tags_suffix }}
+            # Tag with version for tag builds
+            type=semver,pattern={{version}}-${{ matrix.variant.tags_suffix }}
+            type=semver,pattern={{major}}.{{minor}}-${{ matrix.variant.tags_suffix }}
+            type=semver,pattern={{major}}-${{ matrix.variant.tags_suffix }}
+            # Latest tag for main branch and specific variant
+            type=raw,value=latest-${{ matrix.variant.tags_suffix }},enable={{is_default_branch}}
+            # Tag with just the variant name for main branch
+            type=raw,value=${{ matrix.variant.tags_suffix }},enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=OpenConnect VPN Server (${{ matrix.variant.name }})
+            org.opencontainers.image.description=OpenConnect VPN Server - ${{ matrix.variant.name }} variant
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+
+      - name: Build builder image for v1.3 (if needed)
+        if: matrix.variant.name == 'v1.3'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.variant.context }}
+          file: ${{ matrix.variant.build_dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          tags: hhf-vpn-deployment-build:v1.3
+          cache-from: type=gha,scope=build-${{ matrix.variant.name }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.variant.name }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.variant.context }}
+          file: ${{ matrix.variant.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.variant.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant.name }}
+
+  # Job to create a manifest for the "latest" tag pointing to the most feature-complete version
+  create-latest:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    steps:
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_DOCKERHUB }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push latest manifest (DockerHub)
+        run: |
+          # Point latest to the most feature-complete version (v1.3-sid)
+          docker buildx imagetools create -t ${{ env.REGISTRY_DOCKERHUB }}/${{ github.repository_owner }}/hhf-vpn-deployment:latest \
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ github.repository_owner }}/hhf-vpn-deployment:v1.3-sid
+
+      - name: Create and push latest manifest (GHCR)
+        run: |
+          # Point latest to the most feature-complete version (v1.3-sid)
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment:latest \
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}/hhf-vpn-deployment:v1.3-sid
+
+  # Security scanning job
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        variant: [v1.1, v1.3, v1.3-sid]
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository }}/hhf-vpn-deployment:${{ matrix.variant }}'
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.variant }}.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.variant }}.sarif'
+          category: 'trivy-${{ matrix.variant }}'

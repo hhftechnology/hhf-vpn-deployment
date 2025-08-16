@@ -1,4 +1,4 @@
-FROM openconnect-build:v1.3 AS builder
+FROM hhf-vpn-deployment-build:v1.3 AS builder
 
 FROM debian:12
 
